@@ -522,8 +522,244 @@ export const addEvent = (eventType, selector, handler) => {
 
 ---
 
+---
+
+## 🚀 React SSR 작업 진행 중
+
+### React SSR 초기 구현 (2025-01-XX)
+
+#### 1. React SSR 서버 설정
+
+- **파일**: `packages/react/server.js`
+- **내용**: Express 서버 설정, Vite 미들웨어 통합, SSR 렌더링 함수 호출
+
+#### 2. React SSR 렌더링 로직
+
+- **파일**: `packages/react/src/main-server.tsx`
+- **내용**: `renderToString`을 사용한 서버 렌더링, 메타 태그 생성, 초기 데이터 추출
+
+#### 3. 서버 사이드 데이터 로딩
+
+- **파일**: `packages/react/src/ssr-data.ts`
+- **내용**: 홈 페이지 및 상품 상세 페이지 데이터 프리페칭
+
+#### 4. 공통 라이브러리 서버 안전성 개선
+
+##### 4.1 `packages/lib/src/Router.ts` 서버 안전성 개선
+
+- **문제**: 서버 렌더링 시 `Router` 클래스가 `window` API 직접 참조로 에러 발생
+- **해결**: 모든 `window` 접근 부분에 환경 체크 추가
+- **위치**: `packages/lib/src/Router.ts`
+
+**수정 내용:**
+
+- 생성자: `window.addEventListener`, `document.addEventListener` 체크 추가
+- `query`, `params` getter: 서버 환경에서는 빈 객체 반환
+- `push`, `start`: 서버 환경에서는 아무 작업도 하지 않음
+- `#findRoute`: 서버 환경에서는 url 파라미터 기반으로 라우트 매칭
+- `parseQuery`, `getUrl` static: 서버 환경 체크 추가
+
+**주요 변경사항:**
+
+```typescript
+// 생성자에서 서버 환경 체크
+if (typeof window !== "undefined") {
+  window.addEventListener("popstate", () => {
+    // ...
+  });
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", (e) => {
+      // ...
+    });
+  }
+}
+
+// getter에서 서버 환경 체크
+get query(): StringRecord {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  return Router.parseQuery(window.location.search);
+}
+
+// 메서드에서 서버 환경 체크
+push(url: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  // ...
+}
+```
+
+##### 4.2 `packages/lib/src/createStorage.ts` 서버 안전성 개선
+
+- **문제**: 서버 렌더링 시 `createStorage` 함수에서 `window.localStorage` 접근으로 에러 발생
+- **해결**: 서버 환경 체크 및 더미 스토리지 객체 사용
+- **위치**: `packages/lib/src/createStorage.ts`
+
+**수정 내용:**
+
+```typescript
+// getStorage 함수 분리하여 서버 환경 체크
+const getStorage = () => {
+  if (typeof window === "undefined") {
+    return {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+  }
+  return window.localStorage;
+};
+
+export const createStorage = <T>(key: string, storage?: Storage | null) => {
+  const safeStorage = storage || getStorage();
+  // ...
+};
+```
+
+##### 4.3 `packages/react/src/utils/log.ts` 서버 안전성 개선
+
+- **문제**: 서버 렌더링 시 `log.ts`에서 `window` 직접 접근으로 에러 발생
+- **해결**: 모든 `window` 접근에 환경 체크 추가
+- **위치**: `packages/react/src/utils/log.ts`
+
+**수정 내용:**
+
+```typescript
+// 서버 환경에서는 window가 없으므로 조건부 처리
+if (typeof window !== "undefined") {
+  window.__spyCalls = [];
+  window.__spyCallsClear = () => {
+    window.__spyCalls = [];
+  };
+}
+
+export const log: typeof console.log = (...args) => {
+  if (typeof window !== "undefined" && window.__spyCalls) {
+    window.__spyCalls.push(args);
+  }
+  return console.log(...args);
+};
+```
+
+##### 4.4 `packages/react/src/main.tsx` Hydration 구현
+
+- **문제**: SSR HTML에 클라이언트 JavaScript 연결 필요
+- **해결**: `createRoot` → `hydrateRoot` 변경 및 초기 데이터 복원
+- **위치**: `packages/react/src/main.tsx`
+
+**수정 내용:**
+
+```typescript
+import { hydrateRoot } from "react-dom/client";
+import { productStore, PRODUCT_ACTIONS } from "./entities";
+import type { InitialData } from "./types";
+
+function restoreInitialData() {
+  const initialData: InitialData | undefined = window.__INITIAL_DATA__;
+
+  if (initialData) {
+    productStore.dispatch({
+      type: PRODUCT_ACTIONS.SETUP,
+      payload: {
+        products: initialData.products || [],
+        totalCount: initialData.totalCount || 0,
+        categories: initialData.categories || {},
+        currentProduct: initialData.currentProduct || null,
+        relatedProducts: initialData.relatedProducts || [],
+        loading: false,
+        status: "done",
+      },
+    });
+
+    delete window.__INITIAL_DATA__;
+  }
+}
+
+function main() {
+  restoreInitialData();
+  router.start();
+
+  const rootElement = document.getElementById("root")!;
+  hydrateRoot(rootElement, <App />);
+}
+```
+
+**주요 기능:**
+
+- `hydrateRoot` 사용하여 SSR HTML과 클라이언트 JavaScript 연결
+- `window.__INITIAL_DATA__`에서 서버 렌더링된 초기 데이터 복원
+- Store 초기화 후 메모리에서 초기 데이터 삭제
+
+##### 4.5 React SSG 구현
+
+- **목표**: React 앱의 모든 페이지를 빌드 시점에 정적 HTML로 생성
+- **위치**: `packages/react/static-site-generate.js`
+
+**구현 내용:**
+
+```javascript
+// 라우트 수집
+async function getRoutes() {
+  const items = JSON.parse(fs.readFileSync("./src/mocks/items.json", "utf-8"));
+
+  const staticRoutes = [{ url: "/", query: {} }];
+  const productRoutes = items.map((item) => ({
+    url: `/product/${item.productId}/`,
+    query: {},
+  }));
+
+  return [...staticRoutes, ...productRoutes];
+}
+
+// 페이지 생성
+async function generatePage(routeInfo, template) {
+  const { render } = await import("./dist/react-ssr/main-server.js");
+  const { html, head, initialData } = await render(routeInfo.url, routeInfo.query);
+
+  // HTML 조립 및 파일 저장
+  const html = template
+    .replace("<!--app-html-->", html)
+    .replace("<!--app-head-->", head)
+    .replace("</head>", `<script>window.__INITIAL_DATA__ = ...</script></head>`);
+
+  fs.writeFileSync(filePath, html, "utf-8");
+}
+```
+
+**주요 기능:**
+
+- 정적 라우트: `/` (홈 페이지)
+- 동적 라우트: `/product/:id/` (items.json에서 상품 ID 추출)
+- 빌드 시점에 모든 페이지를 정적 HTML로 생성 (341개)
+- `window.__INITIAL_DATA__` 주입
+- Windows 환경 지원 (pathToFileURL 사용)
+
+**문제 해결:**
+
+1. **`window is not defined` 에러**:
+   - `main-server.tsx`에서 `entities` 전체 import 시 `router`가 로드되어 `window` 접근
+   - 해결: `entities/products/productStore`에서 직접 import하여 router 로드 방지
+
+2. **`PublicImage` 컴포넌트 `BASE_URL` 사용**:
+   - `BASE_URL`이 `import.meta.env.PROD` 사용으로 SSG에서 문제 발생 가능
+   - 해결: 서버 컴포넌트에서 `ServerImage` 컴포넌트 생성하여 직접 `<img>` 태그 사용
+
+3. **SSG 빌드 스크립트 누락**:
+   - `build:ssg` 스크립트에 `build:server` 단계 누락
+   - 해결: `build:ssg` 스크립트에 `build:server` 추가
+
+---
+
 ## 📌 다음 단계
 
-- [x] STEP 04: Static Site Generation (SSG) 구현
+- [x] STEP 04: Static Site Generation (SSG) 구현 (Vanilla)
 - [x] 이벤트 위임 버그 수정 (개발 환경 CSR 테스트 실패 문제 해결)
-- [ ] SSG 테스트 통과 확인
+- [x] SSG 테스트 통과 확인 (Vanilla)
+- [x] React SSR 기본 구현 완료
+- [x] React SSR 서버 안전성 개선 (Router, createStorage, log, PageWrapper)
+- [x] React Hydration 구현
+- [x] React SSG 구현 (341개 페이지 생성 완료)
+- [ ] React SSR 테스트 통과 확인
+- [ ] React SSG 테스트 통과 확인
