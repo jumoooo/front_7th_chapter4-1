@@ -471,7 +471,59 @@ JSON.stringify(data).replace(/</g, "\\u003c");
 
 ---
 
+---
+
+### 7. 이벤트 위임 버그 수정 (2025-01-XX)
+
+**문제:**
+
+- 개발 환경(5173)에서 CSR 테스트 실패: `#quantity-increase` 클릭 후 `#quantity-input` 값이 업데이트되지 않음
+- 프로덕션 환경(4173)에서는 정상 동작
+
+**원인 분석:**
+
+- `registerGlobalEvents()`가 한 번만 실행되며, 실행 시점에 `eventHandlers`에 등록된 이벤트 타입에 대해서만 리스너 등록
+- 개발 환경에서 모듈 로딩 순서나 HMR 때문에 `addEvent()`가 `registerGlobalEvents()` 호출 이후에 실행될 경우 리스너가 등록되지 않음
+
+**해결:**
+
+- `addEvent()`에서 새로운 이벤트 타입이 추가될 때 즉시 리스너를 등록하도록 수정
+- `registeredEventTypes` Set으로 이미 등록된 이벤트 타입 추적
+
+**수정 파일:**
+
+- `packages/vanilla/src/utils/eventUtils.js`
+
+**수정 내용:**
+
+```javascript
+// 새로 추가된 이벤트 타입 추적
+const registeredEventTypes = new Set();
+
+// 특정 이벤트 타입에 대한 리스너 등록
+const registerEventListener = (eventType) => {
+  if (typeof document === "undefined" || registeredEventTypes.has(eventType)) {
+    return;
+  }
+  document.body.addEventListener(eventType, handleGlobalEvents);
+  registeredEventTypes.add(eventType);
+};
+
+// addEvent 함수에서 새 이벤트 타입 추가 시 즉시 리스너 등록
+export const addEvent = (eventType, selector, handler) => {
+  if (!eventHandlers[eventType]) {
+    eventHandlers[eventType] = {};
+    // 새로운 이벤트 타입이 추가되면 즉시 리스너 등록
+    registerEventListener(eventType);
+  }
+  eventHandlers[eventType][selector] = handler;
+};
+```
+
+---
+
 ## 📌 다음 단계
 
 - [x] STEP 04: Static Site Generation (SSG) 구현
+- [x] 이벤트 위임 버그 수정 (개발 환경 CSR 테스트 실패 문제 해결)
 - [ ] SSG 테스트 통과 확인
